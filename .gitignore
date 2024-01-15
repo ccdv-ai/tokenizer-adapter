@@ -1,0 +1,6 @@
+build
+tokenizer_adapter.egg-info
+__pycache__
+*/**/__pycache__
+tokenizer_adapter/eval_adapter.py
+tokenizer_adapter/test_adapter.py
