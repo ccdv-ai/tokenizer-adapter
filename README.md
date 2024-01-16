@@ -11,7 +11,7 @@ pip install tokenizer-adapter --upgrade
 ```
 
 ## Usage
-It is recommended to use an existing tokenizer to train the new vocabulary (i.e `tokenizer.train_new_from_iterator(...)`).
+It is recommended to use an existing tokenizer to train the new vocabulary (`tokenizer.train_new_from_iterator(...)`).
 
 ```python
 from tokenizer_adapter import TokenizerAdapter
