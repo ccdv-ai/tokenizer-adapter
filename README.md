@@ -6,7 +6,7 @@ Should work for almost all language models from the Huggingface Hub (need more t
 ## Install
 
 ```
-pip install 
+pip install tokenizer-adapter --upgrade
 ```
 
 ## Usage
