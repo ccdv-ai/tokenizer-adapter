@@ -1,6 +1,6 @@
 # Tokenizer Adapter
 
-A simple tool to adapt a pretrained Huggingface model to a new vocabulary (domain specific) with (almost) no training. \
+A simple tool for adapting a pre-trained Huggingface model to a new vocabulary with (almost) no training. \
 Should work for almost all language models from the Huggingface Hub (need more test).
 
 ## Install
