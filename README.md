@@ -1,7 +1,8 @@
 # Tokenizer Adapter
 
 A simple tool for adapting a pre-trained Huggingface model to a new vocabulary with (almost) no training. \
-Should work for almost all language models from the Huggingface Hub (need more test).
+Should work for most Huggingface Hub language models (requires further testing). \
+**Everything is run on CPU.**
 
 ## Install
 
@@ -10,6 +11,8 @@ pip install tokenizer-adapter --upgrade
 ```
 
 ## Usage
+It is recommended to use an existing tokenizer to train the new vocabulary (i.e `tokenizer.train_new_from_iterator(...)`).
+
 ```python
 from tokenizer_adapter import TokenizerAdapter
 from transformers import AutoTokenizer, AutoModelForMaskedLM
