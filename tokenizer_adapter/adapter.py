@@ -11,14 +11,17 @@ class TokenizerAdapter():
     def __init__(self, method="average", clean_tokenizer=False, custom_preprocessing=None) -> None:
         """
         Adapter an existing model with a new tokenizer
+
         Args:
             method (`str`, *optional*, defaults to 'average'):
-                Method to use to merge tokens. In ["average", "bos", "frequency", "reverse_frequency", "inverse_frequency"]
+                Method to use to merge tokens. In `['average', 'bos', 'frequency', 'reverse_frequency', 'inverse_frequency']`
             clean_tokenizer (`bool`, *optional*, defaults to False):
                 Remove the normalizer, the pre_tokenizer and the decoder in the old tokenizer (experimental)
             custom_preprocessing (`function`, *optional*, defaults to None):
-                A custom function to apply some normalization before feeding tokens from the new vocabulary to the old tokenizer.
-                Example replacing a metaspace by a RoBERTa separator: lambda x: x.replace("▁", "Ġ")
+                A function to apply some normalization before feeding tokens from the new vocabulary to the old tokenizer to find the ids.
+
+                Example to replace a Llama style tokenizer by a RoBERTa style tokenizer: 
+                `custom_preprocessing=lambda x: x.replace('Ġ', '▁')`
         """
         assert method in ["average", "bos", "frequency", "reverse_frequency", "inverse_frequency"]
         self.method = method
@@ -30,6 +33,7 @@ class TokenizerAdapter():
             "inverse_frequency": self.process_inverse_frequency
             }[self.method]
         self.clean_tokenizer = clean_tokenizer
+        self.custom_preprocessing = custom_preprocessing
     
     def get_state_dict_keys_to_update(self, state_dict, vocab_size):
 
@@ -39,18 +43,54 @@ class TokenizerAdapter():
                 state_dict_to_update[key] = tensor
         return state_dict_to_update
 
+    def get_unk_token_id(self, old_tokenizer):
+
+        unk_token_id = old_tokenizer.unk_token_id
+        if unk_token_id is None:
+            unk_token_id = old_tokenizer.pad_token_id
+        if unk_token_id is None:
+            unk_token_id = old_tokenizer.eos_token_id
+        if unk_token_id is None:
+            unk_token_id = old_tokenizer.bos_token_id
+        return unk_token_id
+    
+    def prepare_special_token_ids(self, correspondance_dict, new_tokenizer, old_tokenizer, unk_token_id):
+
+        if new_tokenizer.bos_token_id is not None:
+            correspondance_dict["pairs"][str(new_tokenizer.bos_token_id)] = [
+                old_tokenizer.bos_token_id if old_tokenizer.bos_token_id is not None else unk_token_id]
+            
+        if new_tokenizer.eos_token_id is not None:
+            correspondance_dict["pairs"][str(new_tokenizer.eos_token_id)] = [
+                old_tokenizer.eos_token_id if old_tokenizer.eos_token_id is not None else unk_token_id]
+            
+        if new_tokenizer.pad_token_id is not None:
+            correspondance_dict["pairs"][str(new_tokenizer.pad_token_id)] = [
+                old_tokenizer.pad_token_id if old_tokenizer.pad_token_id is not None else unk_token_id]
+            
+        if new_tokenizer.sep_token_id is not None:
+            correspondance_dict["pairs"][str(new_tokenizer.sep_token_id)] = [
+                old_tokenizer.sep_token_id if old_tokenizer.sep_token_id is not None else unk_token_id]
+            
+        if new_tokenizer.unk_token_id is not None:
+            correspondance_dict["pairs"][str(new_tokenizer.unk_token_id)] = [
+                old_tokenizer.unk_token_id if old_tokenizer.unk_token_id is not None else unk_token_id]
+        
+        if new_tokenizer.mask_token_id is not None:
+            correspondance_dict["pairs"][str(new_tokenizer.mask_token_id)] = [
+                old_tokenizer.mask_token_id if old_tokenizer.mask_token_id is not None else unk_token_id]
+        
+        return correspondance_dict
+    
     def prepare_correspondance_dict(self, new_tokenizer, old_tokenizer):
 
         vocab_size = len(new_tokenizer.vocab.keys())
         old_vocab_size = len(old_tokenizer.vocab.keys())
         frequency_matrix = None 
         
-        unk_token_id = old_tokenizer.unk_token_id
-        if unk_token_id is None:
-            unk_token_id = old_tokenizer.pad_token_id
-        if unk_token_id is None:
-            unk_token_id = old_tokenizer.eos_token_id
+        unk_token_id = self.get_unk_token_id(old_tokenizer)
 
+        # Keep track if using 'frequency' method
         if self.method in ["frequency", "reverse_frequency", "inverse_frequency"]:
             frequency_matrix = torch.zeros(old_vocab_size)
 
@@ -58,21 +98,37 @@ class TokenizerAdapter():
 
         # Loop over the new vocabulary
         for new_token, i in tqdm.tqdm(new_tokenizer.vocab.items()):
-
-            old_token_ids = old_tokenizer.convert_tokens_to_ids([new_token])
-            # if token doesnt exist in old vocab
-            if len(old_token_ids) == 0 or (len(old_token_ids) == 1 and old_token_ids[0] == unk_token_id):
-                # untokenize new_token
-                new_token = new_tokenizer.convert_tokens_to_string([new_token])
-                old_token_ids = old_tokenizer.encode(new_token, add_special_tokens=False)
             
+            # Do custom preprocessing if any before to adapt to the old tokenizer
+            if self.custom_preprocessing is not None:
+                old_token_ids = old_tokenizer.convert_tokens_to_ids([self.custom_preprocessing(new_token)])
+            else:
+                # Try to find the token in the old tokenizer
+                old_token_ids = old_tokenizer.convert_tokens_to_ids([new_token])
+
+            # If token doesnt exist in old vocab
+            if len(old_token_ids) == 0 or (len(old_token_ids) == 1 and old_token_ids[0] == unk_token_id):
+                # Detokenize new_token
+                new_token = new_tokenizer.convert_tokens_to_string([new_token])
+            
+                # Get old ids
+                old_token_ids = old_tokenizer.encode(new_token, add_special_tokens=False)
+                
+            # Remove unk ids
             old_token_ids = [t if t < old_vocab_size else unk_token_id for t in old_token_ids]
+            if len(old_token_ids) == 0:
+                old_token_ids = [unk_token_id]
+
+            # Add pair
             correspondance_dict["pairs"][str(i)] = old_token_ids
 
             # Fill frequency matrix
             if frequency_matrix is not None and len(old_token_ids) > 1:
                 for t in old_token_ids:
                     frequency_matrix[t] += 1
+
+        # Process special tokens
+        correspondance_dict = self.prepare_special_token_ids(correspondance_dict, new_tokenizer, old_tokenizer, unk_token_id)
 
         correspondance_dict["meta"]["vocab_size"] = vocab_size
         correspondance_dict["meta"]["old_vocab_size"] = old_vocab_size
@@ -186,6 +242,7 @@ class TokenizerAdapter():
         
         """
         Adapt a new model from a pretrained model and a pretrained tokenizer
+
         Args:
             new_tokenizer (`PreTrainedTokenizer`):
                 The new tokenizer trained on a specific corpus
@@ -193,6 +250,8 @@ class TokenizerAdapter():
                 The pretrained model to modify
             tokenizer (`PreTrainedTokenizer`):
                 The tokenizer of the pretrained model
+
+        Returns: `PreTrainedModel`
         """
 
         if self.clean_tokenizer:
