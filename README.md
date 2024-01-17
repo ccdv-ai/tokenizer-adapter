@@ -44,7 +44,7 @@ model.save_pretrained("my_new_model/")
 new_tokenizer.save_pretrained("my_new_model/")
 ```
 
-If you want to use a custom/different tokenizer (**experimental**), you may need to use the `custom_preprocessing` argument. \
+To rely on a custom tokenizer (**experimental**), you may need to use the `custom_preprocessing` argument. \
 Example using a RoBERTa (similar to Phi-2) style tokenizer for a CamemBERT model:
 
 ```python
