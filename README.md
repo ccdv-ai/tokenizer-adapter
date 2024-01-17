@@ -1,8 +1,10 @@
 # Tokenizer Adapter
 
-A simple tool for adapting a pre-trained Huggingface model to a new vocabulary with (almost) no training.
+A simple tool for adapting a pretrained Huggingface model to a new vocabulary with (almost) no training.
 
-This technique can significantly reduce sequence length when a language model is used on data with a specific vocabulary (biology, medicine, law, other languages, etc...).
+This technique can significantly reduce sequence length when a language model is used on data with a specific vocabulary (biology, medicine, law, other languages, etc...). 
+
+A slight loss of model quality is likely to be observed, especially when the vocabulary size is greatly reduced. Fine-tuning or additional pretraining during few steps solves the problem in most cases.
 
 Should work for most Huggingface Hub language models (requires further testing). \
 **Everything is run on CPU.**
