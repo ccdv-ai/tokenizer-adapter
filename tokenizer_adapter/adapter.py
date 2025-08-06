@@ -8,7 +8,7 @@ from tokenizers import decoders
 
 class TokenizerAdapter():
 
-    def __init__(self, method="average", clean_tokenizer=False, custom_preprocessing=None) -> None:
+    def __init__(self, method="average", clean_tokenizer=False, original_model=None, custom_preprocessing=None) -> None:
         """
         Adapter an existing model with a new tokenizer
 
@@ -16,23 +16,31 @@ class TokenizerAdapter():
             method (`str`, *optional*, defaults to 'average'):
                 Method to use to merge tokens. In `['average', 'bos', 'frequency', 'reverse_frequency', 'inverse_frequency']`
             clean_tokenizer (`bool`, *optional*, defaults to False):
-                Remove the normalizer, the pre_tokenizer and the decoder in the old tokenizer (experimental)
+                Remove the normalizer, the pre_tokenizer and the decoder in the old tokenizer (experimental).
+            original_model (`transformer`, *optional*, default to None):
+                Used for 'contextual' method' to extract intermediate states.
             custom_preprocessing (`function`, *optional*, defaults to None):
                 A function to apply some normalization before feeding tokens from the new vocabulary to the old tokenizer to find the ids.
 
                 Example to replace a Llama style tokenizer by a RoBERTa style tokenizer: 
                 `custom_preprocessing=lambda x: x.replace('Ġ', '▁')`
         """
-        assert method in ["average", "bos", "frequency", "reverse_frequency", "inverse_frequency"]
+        assert method in ["average", "bos", "frequency", "reverse_frequency", "inverse_frequency", "self_attention", "svd", "contextual"]
         self.method = method
         self.process_function = {
             "average": self.process_average, 
             "bos": self.process_bos,
             "frequency": self.process_frequency,
             "reverse_frequency": self.process_reverse_frequency,
-            "inverse_frequency": self.process_inverse_frequency
+            "inverse_frequency": self.process_inverse_frequency,
+            "self_attention": self.process_self_attention_aggregation,
+            "svd": self.process_svd,
+            "contextual": self.process_contextual
             }[self.method]
         self.clean_tokenizer = clean_tokenizer
+        self.original_model = original_model
+        if self.method == 'contextual':
+            assert self.original_model is not None, "'original_model' must be passed to use this 'contextual' method"
         self.custom_preprocessing = custom_preprocessing
     
     def get_state_dict_keys_to_update(self, state_dict, vocab_size):
@@ -223,6 +231,80 @@ class TokenizerAdapter():
             new_tensor = new_tensor.unsqueeze(-1)
         new_tensor = (new_tensor * frequencies.unsqueeze(-1)).sum(dim=0)
         return new_tensor
+
+    def process_self_attention_aggregation(self, old_idx, tensor, meta_dict):
+        
+        old_embeddings = tensor[old_idx]
+        
+        # Query: la moyenne des embeddings des sous-mots
+        query = old_embeddings.mean(dim=0, keepdim=True)
+        
+        # Keys & Values: les embeddings des sous-mots eux-mêmes
+        keys = values = old_embeddings
+        
+        # Calcul de l'attention
+        d_k = query.shape[-1]
+        scores = torch.matmul(query, keys.transpose(-2, -1)) / sqrt(d_k)
+        attn_weights = torch.softmax(scores, dim=-1)
+        
+        # Appliquer les poids pour obtenir le nouvel embedding
+        new_tensor = torch.matmul(attn_weights, values).squeeze(0)
+        
+        return new_tensor
+
+    def process_svd(self, old_idx, tensor, meta_dict):
+        
+        if len(old_idx) == 1:
+            return tensor[old_idx[0]]
+    
+        # Empiler les embeddings des sous-tokens
+        sub_embeddings = tensor[old_idx]
+        
+        # S'assurer qu'il y a assez de vecteurs pour la SVD
+        if sub_embeddings.shape[0] < 2:
+            return sub_embeddings.mean(dim=0)
+    
+        # Calculer la SVD
+        U, S, Vh = torch.linalg.svd(sub_embeddings, full_matrices=False)
+        
+        # Le nouveau vecteur est le premier composant principal (première colonne de Vh)
+        # mis à l'échelle par la première valeur singulière et la moyenne des normes.
+        # Une heuristique simple est de prendre la première colonne de U * la première valeur singulière
+        new_tensor = U[:, 0] * S[0]
+        
+        return new_tensor
+
+    def process_contextual(self, old_idx, tensor, meta_dict):
+        
+        # tensor est ici la matrice d'embedding statique, mais nous ne l'utiliserons que
+        # si la séquence est de longueur 1.
+        if len(old_idx) == 1:
+            return tensor[old_idx[0]]
+    
+        with torch.no_grad():
+            self.original_model.eval()
+            
+            input_ids = torch.tensor([old_idx], device=self.original_model.device)
+            
+            # Accès aux couches du modèle. Cela peut varier.
+            # Pour RoBERTa: self.original_model.roberta.encoder.layer[0]
+            # Pour BERT: self.original_model.bert.encoder.layer[0]
+            # Nous allons supposer une structure générique pour l'exemple.
+            
+            # 1. Obtenir les embeddings statiques
+            embeddings = self.original_model.get_input_embeddings()(input_ids)
+            
+            # 2. Passer à travers la première couche d'attention
+            # L'accès exact peut nécessiter d'inspecter l'architecture de votre modèle.
+            # Par exemple, pour un modèle Hugging Face standard :
+            encoder_layers = self.original_model.base_model.encoder.layer
+            first_layer_output = encoder_layers[0](embeddings)[0] # [0] pour obtenir les hidden_states
+    
+            # 3. Stratégie : prendre l'état caché du dernier sous-token
+            contextual_embedding = first_layer_output[0, -1, :]
+            
+        # S'assurer que le vecteur est sur le bon device (CPU/GPU) et a le bon type
+        return contextual_embedding.to(device=tensor.device, dtype=tensor.dtype)
 
     def merge_dict(self, state_dict, state_dict_keys_updated):
 
