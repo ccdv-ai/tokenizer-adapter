@@ -7,7 +7,7 @@ This technique can significantly reduce sequence length when a language model is
 A slight loss of model quality is likely to be observed, especially when the vocabulary size is greatly reduced. Fine-tuning or additional pretraining during few steps solves the problem in most cases.
 
 Should work for most Huggingface Hub language models (requires further testing). \
-**Everything is run on CPU.**
+**Everything is run on CPU** by default.
 
 ## Install
 
@@ -23,27 +23,32 @@ Best and easiest way is to use the `tokenizer.train_new_from_iterator(...)` meth
 from tokenizer_adapter import TokenizerAdapter
 from transformers import AutoTokenizer, AutoModelForMaskedLM
 
-BASE_MODEL_PATH = "camembert-base"
+BASE_MODEL_PATH = "roberta-base"
+SAVE_MODEL_PATH = "my_new_model/"
+VOCAB_SIZE = 300
 
 # A simple corpus
 corpus = ["A first sentence", "A second sentence", "blablabla"]
 
 # Load model and tokenizer
-model = AutoModelForMaskedLM.from_pretrained(BASE_MODEL_PATH)
+model = AutoModelForMaskedLM.from_pretrained(BASE_MODEL_PATH)#.cuda() to run on a gpu
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
 
 # Train new vocabulary from the old tokenizer
-new_tokenizer = tokenizer.train_new_from_iterator(corpus, vocab_size=300)
+new_tokenizer = tokenizer.train_new_from_iterator(corpus, vocab_size=VOCAB_SIZE)
 
 # Default params should work in most cases
-adapter = TokenizerAdapter()
+# methods: "average", "bos", "frequency", "reverse_frequency", 
+# "inverse_frequency", "self_attention", "svd", "contextual"
+# default: "average"
+adapter = TokenizerAdapter(method="average")
 
 # Patch the model with the new tokenizer
 model = adapter.adapt_from_pretrained(new_tokenizer, model, tokenizer)
 
 # Save the model and the new tokenizer
-model.save_pretrained("my_new_model/")
-new_tokenizer.save_pretrained("my_new_model/")
+model.save_pretrained(SAVE_MODEL_PATH)
+new_tokenizer.save_pretrained(SAVE_MODEL_PATH)
 ```
 
 To rely on a custom tokenizer (**experimental**), you may need to use the `custom_preprocessing` argument. \
@@ -55,6 +60,8 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM
 
 BASE_MODEL_PATH = "camembert-base"
 NEW_CUSTOM_TOKENIZER = "roberta-base"
+SAVE_MODEL_PATH = "my_new_model/"
+VOCAB_SIZE = 300
 
 # A simple corpus
 corpus = ["A first sentence", "A second sentence", "blablabla"]
@@ -65,7 +72,7 @@ tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
 
 # Also load this custom tokenizer to train the new one
 new_tokenizer = AutoTokenizer.from_pretrained(NEW_CUSTOM_TOKENIZER)
-new_tokenizer = new_tokenizer.train_new_from_iterator(corpus, vocab_size=300)
+new_tokenizer = new_tokenizer.train_new_from_iterator(corpus, vocab_size=VOCAB_SIZE)
 
 # CamemBERT tokenizer relies on '▁' while the RoBERTa one relies on 'Ġ'
 adapter = TokenizerAdapter(custom_preprocessing=lambda x: x.replace('Ġ', '▁'))
@@ -74,6 +81,6 @@ adapter = TokenizerAdapter(custom_preprocessing=lambda x: x.replace('Ġ', '▁')
 model = adapter.adapt_from_pretrained(new_tokenizer, model, tokenizer)
 
 # Save the model and the new tokenizer
-model.save_pretrained("my_new_model/")
-new_tokenizer.save_pretrained("my_new_model/")
+model.save_pretrained(SAVE_MODEL_PATH)
+new_tokenizer.save_pretrained(SAVE_MODEL_PATH)
 ```

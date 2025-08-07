@@ -233,9 +233,14 @@ class TokenizerAdapter():
         return new_tensor
 
     def process_self_attention_aggregation(self, old_idx, tensor, meta_dict):
-        
+
         old_embeddings = tensor[old_idx]
-        
+
+        # Si le tenseur est 1D (cas d'un vecteur de biais), on utilise une moyenne simple.
+        if len(old_embeddings.shape) == 1:
+            return old_embeddings.mean(dim=0)
+
+        # Si le tenseur est 2D (cas de la matrice d'embedding), on procède avec la logique d'attention.
         # Query: la moyenne des embeddings des sous-mots
         query = old_embeddings.mean(dim=0, keepdim=True)
         
@@ -244,35 +249,50 @@ class TokenizerAdapter():
         
         # Calcul de l'attention
         d_k = query.shape[-1]
+        # La ligne ci-dessous est maintenant sécurisée car on sait que 'keys' est au moins 2D.
         scores = torch.matmul(query, keys.transpose(-2, -1)) / sqrt(d_k)
         attn_weights = torch.softmax(scores, dim=-1)
         
         # Appliquer les poids pour obtenir le nouvel embedding
-        new_tensor = torch.matmul(attn_weights, values).squeeze(0)
+        new_embedding = torch.matmul(attn_weights, values).squeeze(0)
         
-        return new_tensor
+        return new_embedding
 
     def process_svd(self, old_idx, tensor, meta_dict):
         
-        if len(old_idx) == 1:
-            return tensor[old_idx[0]]
-    
-        # Empiler les embeddings des sous-tokens
-        sub_embeddings = tensor[old_idx]
-        
-        # S'assurer qu'il y a assez de vecteurs pour la SVD
-        if sub_embeddings.shape[0] < 2:
-            return sub_embeddings.mean(dim=0)
-    
-        # Calculer la SVD
-        U, S, Vh = torch.linalg.svd(sub_embeddings, full_matrices=False)
-        
-        # Le nouveau vecteur est le premier composant principal (première colonne de Vh)
-        # mis à l'échelle par la première valeur singulière et la moyenne des normes.
-        # Une heuristique simple est de prendre la première colonne de U * la première valeur singulière
-        new_tensor = U[:, 0] * S[0]
-        
-        return new_tensor
+        sub_values = tensor[old_idx]
+
+        # 1. Gérer les tenseurs 1D (biais) qui ne sont pas compatibles avec la SVD.
+        if len(sub_values.shape) == 1:
+            return sub_values.mean(dim=0)
+
+        # 2. Si un seul sous-mot, pas besoin de SVD, on retourne directement son vecteur.
+        #    On utilise squeeze(0) pour passer de [1, 768] à [768].
+        if sub_values.shape[0] < 2:
+            return sub_values.squeeze(0)
+
+        # 3. Effectuer la SVD. Vh contient les vecteurs singuliers droits en tant que lignes.
+        #    Vh aura une forme de [k, embedding_dim], où k = nombre de sous-mots.
+        dtype = sub_values.dtype
+        try:
+            _, _, Vh = torch.linalg.svd(sub_values.type(torch.float32), full_matrices=False)
+            Vh = Vh.type(dtype)
+        except torch.linalg.LinAlgError:
+            # En cas de problème numérique avec SVD, on se rabat sur la moyenne.
+            return sub_values.mean(dim=0)
+
+        # La première ligne de Vh est le premier composant principal.
+        # Ce vecteur représente la direction de variance maximale dans l'espace des embeddings.
+        # Sa forme est [embedding_dim], ce qui est exactement ce dont nous avons besoin.
+        new_embedding = Vh[0, :]
+
+        # Il est possible que la direction du vecteur soit inversée. Une heuristique
+        # consiste à s'assurer qu'il pointe dans la même direction générale que la moyenne.
+        mean_vec = sub_values.mean(dim=0)
+        if torch.dot(new_embedding, mean_vec) < 0:
+            new_embedding = -new_embedding # Inverser le vecteur
+
+        return new_embedding
 
     def process_contextual(self, old_idx, tensor, meta_dict):
         
