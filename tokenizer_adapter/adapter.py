@@ -105,9 +105,12 @@ class TokenizerAdapter:
 
             correspondance_dict["pairs"][str(i)] = old_token_ids
 
-            if frequency_matrix is not None and len(old_token_ids) > 1:
+            if frequency_matrix is not None:
                 for t in old_token_ids:
                     frequency_matrix[t] += 1
+
+        if frequency_matrix is not None:
+            frequency_matrix /= old_vocab_size
 
         correspondance_dict = self.prepare_special_token_ids(correspondance_dict, new_tokenizer, old_tokenizer, unk_token_id)
 
@@ -173,36 +176,45 @@ class TokenizerAdapter:
 
     def _get_frequency_weights(self, old_idx, meta_dict, mode='normal'):
         """Calculates weights based on subword frequencies."""
-        freq_matrix = meta_dict["frequency_matrix"]
-        frequencies = freq_matrix / (freq_matrix.sum() + 1e-8)
+        frequencies = meta_dict["frequency_matrix"]
         sub_frequencies = frequencies[old_idx]
 
-        if mode == 'reverse':
-            weights = 1 - sub_frequencies
-        elif mode == 'inverse':
+        if mode == 'inverse':
             weights = 1 / (sub_frequencies + 1e-8)
         else:
-            weights = sub_frequencies
+            # Scale to get prob distribution
+            sub_frequencies /= sub_frequencies.sum() + 1e-8
+            if mode == 'reverse':
+                weights = 1 - sub_frequencies
+            else:
+                weights = sub_frequencies
 
+        # All between 0 and 1
         return weights / (weights.sum() + 1e-8)
 
     def process_frequency(self, old_idx, tensor, meta_dict):
         """Weights subword embeddings by their frequency."""
         weights = self._get_frequency_weights(old_idx, meta_dict, mode='normal')
         sub_embeddings = tensor[old_idx]
-        return torch.einsum('i,id->d', weights.to(tensor.dtype), sub_embeddings) if len(sub_embeddings.shape) > 1 else torch.einsum('i,i->', weights.to(tensor.dtype), sub_embeddings)
+        if len(sub_embeddings.shape) > 1:
+            return torch.einsum('i,id->d', weights.to(tensor.dtype), sub_embeddings)
+        return torch.einsum('i,i->', weights.to(tensor.dtype), sub_embeddings)
 
     def process_reverse_frequency(self, old_idx, tensor, meta_dict):
         """Weights subword embeddings by their reverse frequency."""
         weights = self._get_frequency_weights(old_idx, meta_dict, mode='reverse')
         sub_embeddings = tensor[old_idx]
-        return torch.einsum('i,id->d', weights.to(tensor.dtype), sub_embeddings) if len(sub_embeddings.shape) > 1 else torch.einsum('i,i->', weights.to(tensor.dtype), sub_embeddings)
+        if len(sub_embeddings.shape) > 1:
+            return torch.einsum('i,id->d', weights.to(tensor.dtype), sub_embeddings)
+        return torch.einsum('i,i->', weights.to(tensor.dtype), sub_embeddings)
 
     def process_inverse_frequency(self, old_idx, tensor, meta_dict):
         """Weights subword embeddings by their inverse frequency."""
         weights = self._get_frequency_weights(old_idx, meta_dict, mode='inverse')
         sub_embeddings = tensor[old_idx]
-        return torch.einsum('i,id->d', weights.to(tensor.dtype), sub_embeddings) if len(sub_embeddings.shape) > 1 else torch.einsum('i,i->', weights.to(tensor.dtype), sub_embeddings)
+        if len(sub_embeddings.shape) > 1:
+            return torch.einsum('i,id->d', weights.to(tensor.dtype), sub_embeddings)
+        return torch.einsum('i,i->', weights.to(tensor.dtype), sub_embeddings)
 
     def process_self_attention_aggregation(self, old_idx, tensor, meta_dict):
         """Aggregates subword embeddings using a self-attention mechanism."""
