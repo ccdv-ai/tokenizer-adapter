@@ -12,7 +12,7 @@ class TokenizerAdapter:
     by modifying the embedding and language model (LM) head layers.
     """
 
-    def __init__(self, method="average", clean_tokenizer=False, original_model=None, custom_preprocessing=None):
+    def __init__(self, method="average", clean_tokenizer=False, custom_preprocessing=None):
         """
         Initializes the adapter.
 
@@ -23,8 +23,6 @@ class TokenizerAdapter:
                           'task_arithmetic', 'ties', 'dare_linear', 'dare_ties', 'slerp'].
             clean_tokenizer (`bool`, *optional*, defaults to False):
                 Removes the normalizer, pre-tokenizer, and decoder from the old tokenizer (experimental).
-            original_model (`PreTrainedModel`, *optional*, default to None):
-                Required for the 'contextual' method to extract hidden states.
             custom_preprocessing (`function`, *optional*, defaults to None):
                 Normalization function to apply to new tokens before passing them to the old tokenizer.
                 Example: `lambda x: x.replace('Ġ', ' ')`.
@@ -53,7 +51,6 @@ class TokenizerAdapter:
 
         self.clean_tokenizer = clean_tokenizer
         self.custom_preprocessing = custom_preprocessing
-        self.context_model = None # Initialize context_model
 
     def get_state_dict_keys_to_update(self, state_dict, vocab_size):
         """Identifies the layers in the state_dict that have a vocabulary-sized dimension."""
