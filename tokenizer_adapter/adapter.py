@@ -4,6 +4,7 @@ from copy import deepcopy
 from math import sqrt
 from tokenizers import normalizers, pre_tokenizers, decoders
 from transformers import PreTrainedModel, PreTrainedTokenizer, PreTrainedTokenizerFast, AutoConfig
+import numpy as np
 
 class TokenizerAdapter:
     """
@@ -18,7 +19,8 @@ class TokenizerAdapter:
         Args:
             method (`str`, *optional*, defaults to 'average'):
                 Method for aggregating subword embeddings.
-                Options: ['average', 'bos', 'frequency', 'reverse_frequency', 'inverse_frequency', 'self_attention', 'svd', 'contextual'].
+                Options: ['average', 'bos_attention', 'frequency', 'reverse_frequency', 'inverse_frequency', 'self_attention', 'svd',
+                          'task_arithmetic', 'ties', 'dare_linear', 'dare_ties', 'slerp'].
             clean_tokenizer (`bool`, *optional*, defaults to False):
                 Removes the normalizer, pre-tokenizer, and decoder from the old tokenizer (experimental).
             original_model (`PreTrainedModel`, *optional*, default to None):
@@ -27,60 +29,31 @@ class TokenizerAdapter:
                 Normalization function to apply to new tokens before passing them to the old tokenizer.
                 Example: `lambda x: x.replace('Ġ', ' ')`.
         """
-        valid_methods = ["average", "bos", "frequency", "reverse_frequency", "inverse_frequency", "self_attention", "svd", "contextual"]
+        valid_methods = ["average", "bos_attention", "self_attention", "first_attention", "frequency", "reverse_frequency", "inverse_frequency", "svd",
+                         "task_arithmetic", "ties", "dare_linear", "dare_ties", "slerp"]
         if method not in valid_methods:
             raise ValueError(f"Method '{method}' is not recognized. Valid methods: {valid_methods}")
 
         self.method = method
         self.process_function = {
             "average": self.process_average,
-            "bos": self.process_bos,
+            "bos_attention": self.process_bos,
+            "self_attention": self.process_self_attention_aggregation,
+            "first_attention": self.process_first_attention_aggregation,
             "frequency": self.process_frequency,
             "reverse_frequency": self.process_reverse_frequency,
             "inverse_frequency": self.process_inverse_frequency,
-            "self_attention": self.process_self_attention_aggregation,
             "svd": self.process_svd,
-            "contextual": self.process_contextual
+            "task_arithmetic": self.process_task_arithmetic,
+            "ties": self.process_ties,
+            "dare_linear": self.process_dare_linear,
+            "dare_ties": self.process_dare_ties,
+            "slerp": self.process_slerp,
         }[self.method]
 
         self.clean_tokenizer = clean_tokenizer
         self.custom_preprocessing = custom_preprocessing
         self.context_model = None # Initialize context_model
-
-        if self.method == 'contextual':
-            if original_model is None:
-                raise ValueError("'original_model' must be provided to use the 'contextual' method.")
-            
-            # --- OPTIMIZATION: Create a shallow, 1-layer model for contextual processing ---
-            print("Creating a lightweight, 1-layer model for the 'contextual' method...")
-            with torch.no_grad():
-                original_model.eval()
-                model_class = type(original_model)
-                
-                # Create a new config with only one hidden layer
-                shallow_config = deepcopy(original_model.config)
-                shallow_config.num_hidden_layers = 1
-                
-                # Instantiate the shallow model structure
-                self.context_model = model_class(shallow_config)
-                
-                # Prepare a state_dict with only the necessary weights
-                original_state_dict = original_model.state_dict()
-                shallow_state_dict = self.context_model.state_dict()
-                
-                # Copy embedding weights and the weights of the first transformer layer
-                for key in shallow_state_dict.keys():
-                    if key in original_state_dict:
-                        shallow_state_dict[key] = original_state_dict[key].clone()
-                
-                self.context_model.load_state_dict(shallow_state_dict)
-                self.context_model.to(original_model.device)
-                self.context_model.eval()
-            print("Lightweight model created successfully.")
-            # We no longer need the full original model in this class
-            self.original_model = None 
-        else:
-            self.original_model = original_model
 
     def get_state_dict_keys_to_update(self, state_dict, vocab_size):
         """Identifies the layers in the state_dict that have a vocabulary-sized dimension."""
@@ -220,26 +193,41 @@ class TokenizerAdapter:
         """Weights subword embeddings by their frequency."""
         weights = self._get_frequency_weights(old_idx, meta_dict, mode='normal')
         sub_embeddings = tensor[old_idx]
-        return torch.einsum('i,id->d', weights, sub_embeddings) if len(sub_embeddings.shape) > 1 else torch.einsum('i,i->', weights, sub_embeddings)
+        return torch.einsum('i,id->d', weights.to(tensor.dtype), sub_embeddings) if len(sub_embeddings.shape) > 1 else torch.einsum('i,i->', weights.to(tensor.dtype), sub_embeddings)
 
     def process_reverse_frequency(self, old_idx, tensor, meta_dict):
         """Weights subword embeddings by their reverse frequency."""
         weights = self._get_frequency_weights(old_idx, meta_dict, mode='reverse')
         sub_embeddings = tensor[old_idx]
-        return torch.einsum('i,id->d', weights, sub_embeddings) if len(sub_embeddings.shape) > 1 else torch.einsum('i,i->', weights, sub_embeddings)
+        return torch.einsum('i,id->d', weights.to(tensor.dtype), sub_embeddings) if len(sub_embeddings.shape) > 1 else torch.einsum('i,i->', weights.to(tensor.dtype), sub_embeddings)
 
     def process_inverse_frequency(self, old_idx, tensor, meta_dict):
         """Weights subword embeddings by their inverse frequency."""
         weights = self._get_frequency_weights(old_idx, meta_dict, mode='inverse')
         sub_embeddings = tensor[old_idx]
-        return torch.einsum('i,id->d', weights, sub_embeddings) if len(sub_embeddings.shape) > 1 else torch.einsum('i,i->', weights, sub_embeddings)
+        return torch.einsum('i,id->d', weights.to(tensor.dtype), sub_embeddings) if len(sub_embeddings.shape) > 1 else torch.einsum('i,i->', weights.to(tensor.dtype), sub_embeddings)
 
     def process_self_attention_aggregation(self, old_idx, tensor, meta_dict):
         """Aggregates subword embeddings using a self-attention mechanism."""
         old_embeddings = tensor[old_idx]
+
         if len(old_embeddings.shape) == 1: return old_embeddings.mean(dim=0)
 
         query = old_embeddings.mean(dim=0, keepdim=True)
+        keys = values = old_embeddings
+
+        d_k = query.shape[-1]
+        scores = torch.matmul(query, keys.transpose(-2, -1)) / sqrt(d_k)
+        attn_weights = torch.softmax(scores, dim=-1)
+
+        return torch.matmul(attn_weights, values).squeeze(0)
+
+    def process_first_attention_aggregation(self, old_idx, tensor, meta_dict):
+        """Aggregates subword embeddings using a self-attention mechanism."""
+        old_embeddings = tensor[old_idx]
+        if len(old_embeddings.shape) == 1: return old_embeddings.mean(dim=0)
+
+        query = old_embeddings[:1].mean(dim=0, keepdim=True)
         keys = values = old_embeddings
 
         d_k = query.shape[-1]
@@ -265,34 +253,116 @@ class TokenizerAdapter:
             new_embedding = -new_embedding
         return new_embedding
 
-    def process_contextual(self, old_idx, tensor, meta_dict):
-        """
-        Uses the lightweight, 1-layer 'context_model' to get contextualized embeddings.
-        """
-        # If the original tensor is 1D (e.g., a bias vector), the contextual method is not applicable.
-        # A contextual forward pass produces a hidden state vector (1D), which cannot be assigned to a scalar.
-        # We fall back to a simple average, which is a sensible default for biases.
-        if len(tensor.shape) == 1:
-            return tensor[old_idx].mean(dim=0)
+    def process_task_arithmetic(self, old_idx, tensor, meta_dict, density=0.9, scaling_factor=1.0):
+        """Combines subword embeddings using task arithmetic."""
+        sub_embeddings = tensor[old_idx]
+        if len(sub_embeddings.shape) == 1: return sub_embeddings.mean(dim=0)
 
-        # The rest of the logic is for 2D tensors (embedding matrices)
-        if len(old_idx) == 1:
-            return tensor[old_idx[0]]
+        reference_embedding = sub_embeddings.mean(dim=0)
+        task_vector = sub_embeddings - reference_embedding
+        
+        # Sparsify and rescale
+        if density < 1.0:
+            task_vector = self.sparsify(task_vector, density)
+        
+        return reference_embedding + scaling_factor * task_vector.mean(dim=0)
 
-        with torch.no_grad():
-            input_ids = torch.tensor([old_idx], device=self.context_model.device)
+    def process_ties(self, old_idx, tensor, meta_dict, density=0.9):
+        """Combines subword embeddings using TIES-merging."""
+        sub_embeddings = tensor[old_idx]
+        if len(sub_embeddings.shape) == 1: return sub_embeddings.mean(dim=0)
 
-            # Use the pre-loaded lightweight model
-            outputs = self.context_model(input_ids, output_hidden_states=True)
+        reference_embedding = sub_embeddings.mean(dim=0)
+        task_vectors = sub_embeddings - reference_embedding
+        
+        # Sparsify
+        task_vectors = self.sparsify(task_vectors, density)
+        
+        # Sign consensus
+        sign_consensus = torch.sign(task_vectors.sum(dim=0))
+        
+        # Elect final values
+        final_task_vector = torch.zeros_like(reference_embedding)
+        for i in range(task_vectors.shape[0]):
+            final_task_vector += torch.where(torch.sign(task_vectors[i]) == sign_consensus, task_vectors[i], 0)
             
-            # hidden_states[0] is the initial embedding layer output
-            # hidden_states[1] is the output of the first (and only) transformer layer
-            first_layer_hidden_states = outputs.hidden_states[1]
+        return reference_embedding + final_task_vector / len(old_idx)
 
-            # Get the embedding of the last token
-            contextual_embedding = first_layer_hidden_states[0, -1, :]
+    def process_dare_linear(self, old_idx, tensor, meta_dict, density=0.9, scaling_factor=1.0):
+        """Combines subword embeddings using DARE (linear)."""
+        sub_embeddings = tensor[old_idx]
+        if len(sub_embeddings.shape) == 1: return sub_embeddings.mean(dim=0)
 
-        return contextual_embedding.to(device=tensor.device, dtype=tensor.dtype)
+        reference_embedding = sub_embeddings.mean(dim=0)
+        task_vector = sub_embeddings - reference_embedding
+
+        # Sparsify and rescale
+        task_vector = self.sparsify(task_vector, density, rescale=True)
+
+        return reference_embedding + scaling_factor * task_vector.mean(dim=0)
+
+    def process_dare_ties(self, old_idx, tensor, meta_dict, density=0.9):
+        """Combines subword embeddings using DARE (TIES)."""
+        sub_embeddings = tensor[old_idx]
+        if len(sub_embeddings.shape) == 1: return sub_embeddings.mean(dim=0)
+
+        reference_embedding = sub_embeddings.mean(dim=0)
+        task_vectors = sub_embeddings - reference_embedding
+
+        # Sparsify and rescale
+        task_vectors = self.sparsify(task_vectors, density, rescale=True)
+
+        # Sign consensus
+        sign_consensus = torch.sign(task_vectors.sum(dim=0))
+        
+        # Elect final values
+        final_task_vector = torch.zeros_like(reference_embedding)
+        for i in range(task_vectors.shape[0]):
+            final_task_vector += torch.where(torch.sign(task_vectors[i]) == sign_consensus, task_vectors[i], 0)
+
+        return reference_embedding + final_task_vector / len(old_idx)
+
+    def sparsify(self, tensor, density, rescale=False):
+        """Sparsifies a tensor by setting a fraction of its elements to zero."""
+        if density == 1.0:
+            return tensor
+            
+        tensor_flat = tensor.flatten()
+        k = int(density * tensor_flat.numel())
+        
+        if k == 0:
+            return torch.zeros_like(tensor)
+
+        top_k_values, _ = torch.topk(torch.abs(tensor_flat), k)
+        mask = torch.abs(tensor) >= top_k_values[-1]
+        
+        if rescale:
+            return torch.where(mask, tensor, 0) * (1 / density)
+        else:
+            return torch.where(mask, tensor, 0)
+
+    def process_slerp(self, old_idx, tensor, meta_dict, t=0.5):
+        """Interpolates between subword embeddings using SLERP."""
+        sub_embeddings = tensor[old_idx]
+        if len(sub_embeddings.shape) == 1 or sub_embeddings.shape[0] < 2:
+            return sub_embeddings.mean(dim=0)
+
+        # Normalize embeddings
+        sub_embeddings_norm = torch.nn.functional.normalize(sub_embeddings, p=2, dim=-1)
+        
+        # Pairwise SLERP
+        result = sub_embeddings_norm[0]
+        for i in range(1, len(sub_embeddings_norm)):
+            omega = torch.acos(torch.dot(result, sub_embeddings_norm[i]).clamp(-1, 1))
+            sin_omega = torch.sin(omega)
+            if sin_omega == 0:
+                continue
+            
+            c1 = torch.sin((1 - t) * omega) / sin_omega
+            c2 = torch.sin(t * omega) / sin_omega
+            result = c1 * result + c2 * sub_embeddings_norm[i]
+            
+        return result
 
     def prepare_new_config(self, config, new_tokenizer):
         """Creates a new model configuration based on the new tokenizer."""
@@ -357,8 +427,10 @@ class TokenizerAdapter:
 # # 2. Load your new tokenizer (e.g., one you have trained)
 # new_tokenizer = AutoTokenizer.from_pretrained("./path/to/your/new/tokenizer")
 
-# # 3. Initialize and use the adapter
-# adapter = TokenizerAdapter(method="average", original_model=original_model)
+# # 3. Initialize and use the adapter with one of the new methods
+# # adapter = TokenizerAdapter(method="ties", original_model=original_model)
+# adapter = TokenizerAdapter(method="dare_ties", original_model=original_model)
+
 
 # # Correct function call: (model, new_tokenizer, old_tokenizer)
 # new_adapted_model = adapter.adapt_from_pretrained(
