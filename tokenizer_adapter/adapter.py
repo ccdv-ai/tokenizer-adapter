@@ -19,8 +19,9 @@ class TokenizerAdapter:
         Args:
             method (`str`, *optional*, defaults to 'average'):
                 Method for aggregating subword embeddings.
-                Options: ['average', 'bos_attention', 'frequency', 'reverse_frequency', 'inverse_frequency', 'self_attention', 'svd',
-                          'task_arithmetic', 'ties', 'dare_linear', 'dare_ties', 'slerp'].
+                Options: ['average', 'bos_attention', 'self_attention', 'first_attention', 
+                        'frequency', 'reverse_frequency', 'inverse_frequency', 'svd',
+                        'task_arithmetic', 'ties', 'dare_linear', 'dare_ties', 'slerp'].
             clean_tokenizer (`bool`, *optional*, defaults to False):
                 Removes the normalizer, pre-tokenizer, and decoder from the old tokenizer (experimental).
             custom_preprocessing (`function`, *optional*, defaults to None):

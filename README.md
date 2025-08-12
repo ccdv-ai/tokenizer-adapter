@@ -1,86 +1,135 @@
 # Tokenizer Adapter
 
-A simple tool for adapting a pretrained Huggingface model to a new vocabulary with (almost) no training.
+A simple tool to adapt a pretrained Hugging Face transformer model to a new, specialized vocabulary with minimal to no retraining.
 
-This technique can significantly reduce sequence length when a language model is used on data with a specific vocabulary (biology, medicine, law, other languages, etc...). 
+This technique can significantly reduce sequence length and computational cost when applying a general-purpose language model to domain-specific data, such as in biology, medicine, law, or other languages.
 
-A slight loss of model quality is likely to be observed, especially when the vocabulary size is greatly reduced. Fine-tuning or additional pretraining during few steps solves the problem in most cases.
+While a slight decrease in accuracy might be observed, especially with a significantly smaller vocabulary, this can typically be mitigated with a few steps of fine-tuning or further pre-training.
 
-Should work for most Huggingface Hub language models (requires further testing). \
-**Everything is run on CPU** by default.
+The library is designed to work with most language models available on the Hugging Face Hub and runs on the CPU by default.
 
-## Install
+## Why Use Tokenizer Adapter?
 
-```
+Pretrained language models from the Hugging Face Hub, like `roberta-base` or `modernbert`, are trained on vast, general-domain text. Their tokenizers are optimized for this general vocabulary. When run these models on a specific domain (e.g., legal documents, scientific papers), words are often oversplitted. This leads to:
+
+*   **Longer input sequences:** This increases memory consumption and computational time.
+*   **Potential loss of semantic meaning:** Sub-optimal tokenization can obscure the meaning of domain-specific terms.
+
+**Tokenizer Adapter** solves this by reconfiguring the model's token embeddings to match a new, more efficient tokenizer trained on your target corpus. This results in shorter sequences, faster processing, and potentially better performance after fine-tuning.
+
+## Installation
+
+Install the package using pip:
+
+```bash
 pip install tokenizer-adapter --upgrade
 ```
 
-## Usage
-It is recommended to use an existing tokenizer to train the new vocabulary. \
-Best and easiest way is to use the `tokenizer.train_new_from_iterator(...)` method.
+## How It Works
+
+The core idea is to create a new, specialized vocabulary and tokenizer from your target corpus. Then, the `TokenizerAdapter` maps the embeddings of the original model's vocabulary to the new vocabulary. This is achieved by leveraging different methods to approximate the embeddings for the new tokens based on the existing ones.
+
+The library offers several methods for this adaptation, including:
+
+*   `'average'`: Averages the embeddings of the old tokens that constitute a new token. (Recommended)
+*   `'first_attention'`: Uses the embedding of the first sub-token based on attention scores.
+*   And many others like `'bos_attention'`, `'self_attention'`, `'frequency'`, `'svd'`, etc.
+
+## Basic Usage
+
+The most straightforward approach is to train a new tokenizer from your corpus using the `train_new_from_iterator()` method of an existing tokenizer.
 
 ```python
 from tokenizer_adapter import TokenizerAdapter
 from transformers import AutoTokenizer, AutoModelForMaskedLM
 
+# 1. Define paths and parameters
 BASE_MODEL_PATH = "roberta-base"
-SAVE_MODEL_PATH = "my_new_model/"
-VOCAB_SIZE = 300
+SAVE_MODEL_PATH = "my-adapted-roberta"
+VOCAB_SIZE = 5000  # Adjust based on your corpus size and domain specificity
 
-# A simple corpus
-corpus = ["A first sentence", "A second sentence", "blablabla"]
+# 2. Prepare your corpus (a list of strings)
+# For a real-world scenario, this would be a large dataset
+corpus = [
+    "This is a sentence from my domain-specific corpus.",
+    "It contains specialized terminology that the base model may not handle well.",
+    # ... more sentences
+]
 
-# Load model and tokenizer
-model = AutoModelForMaskedLM.from_pretrained(BASE_MODEL_PATH)#.cuda() to run on a gpu
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
-
-# Train new vocabulary from the old tokenizer
-new_tokenizer = tokenizer.train_new_from_iterator(corpus, vocab_size=VOCAB_SIZE)
-
-# Default params should work in most cases
-# methods: "average", "bos", "frequency", "reverse_frequency", 
-# "inverse_frequency", "self_attention", "svd", "contextual"
-# default: "average"
-adapter = TokenizerAdapter(method="average")
-
-# Patch the model with the new tokenizer
-model = adapter.adapt_from_pretrained(new_tokenizer, model, tokenizer)
-
-# Save the model and the new tokenizer
-model.save_pretrained(SAVE_MODEL_PATH)
-new_tokenizer.save_pretrained(SAVE_MODEL_PATH)
-```
-
-To rely on a custom tokenizer (**experimental**), you may need to use the `custom_preprocessing` argument. \
-Example using a RoBERTa (similar to Phi-2) style tokenizer for a CamemBERT model:
-
-```python
-from tokenizer_adapter import TokenizerAdapter
-from transformers import AutoTokenizer, AutoModelForMaskedLM
-
-BASE_MODEL_PATH = "camembert-base"
-NEW_CUSTOM_TOKENIZER = "roberta-base"
-SAVE_MODEL_PATH = "my_new_model/"
-VOCAB_SIZE = 300
-
-# A simple corpus
-corpus = ["A first sentence", "A second sentence", "blablabla"]
-
-# Load model and tokenizer
+# 3. Load the base model and tokenizer
 model = AutoModelForMaskedLM.from_pretrained(BASE_MODEL_PATH)
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
 
-# Also load this custom tokenizer to train the new one
-new_tokenizer = AutoTokenizer.from_pretrained(NEW_CUSTOM_TOKENIZER)
-new_tokenizer = new_tokenizer.train_new_from_iterator(corpus, vocab_size=VOCAB_SIZE)
+# To run on a GPU, uncomment the following line:
+# model.cuda()
 
-# CamemBERT tokenizer relies on '▁' while the RoBERTa one relies on 'Ġ'
-adapter = TokenizerAdapter(custom_preprocessing=lambda x: x.replace('Ġ', '▁'))
+# 4. Train a new tokenizer on your corpus
+# This new tokenizer will be optimized for your data
+new_tokenizer = tokenizer.train_new_from_iterator(corpus, vocab_size=VOCAB_SIZE)
 
-# Patch the model with the new tokenizer
-model = adapter.adapt_from_pretrained(new_tokenizer, model, tokenizer)
+# 5. Initialize the adapter and adapt the model
+# The 'average' method is a robust default choice
+adapter = TokenizerAdapter(method="average")
+model = adapter.adapt_from_pretrained(model, new_tokenizer, tokenizer)
 
-# Save the model and the new tokenizer
+# 6. Save your new, adapted model and tokenizer
 model.save_pretrained(SAVE_MODEL_PATH)
 new_tokenizer.save_pretrained(SAVE_MODEL_PATH)
+
+print(f"Model and tokenizer adapted and saved to {SAVE_MODEL_PATH}")
 ```
+
+## Advanced Usage: Custom Tokenizer (Experimental)
+
+In some cases, you might want to use a tokenizer with a different architecture (e.g., adapting a CamemBERT model with a RoBERTa-style tokenizer). This is an experimental feature that may require a `custom_preprocessing` function to align the token representations.
+
+For instance, CamemBERT uses `▁` as a prefix for sub-word units, while RoBERTa uses `Ġ`. The `custom_preprocessing` function can handle such differences.
+
+```python
+from tokenizer_adapter import TokenizerAdapter
+from transformers import AutoTokenizer, AutoModelForMaskedLM
+
+# 1. Define paths and parameters
+BASE_MODEL_PATH = "camembert-base"
+NEW_CUSTOM_TOKENIZER_PATH = "roberta-base"
+SAVE_MODEL_PATH = "my-adapted-camembert"
+VOCAB_SIZE = 5000
+
+# 2. Prepare your corpus
+corpus = [
+    "Une phrase d'exemple pour notre corpus.",
+    "Avec une terminologie spécifique au domaine.",
+    # ...
+]
+
+# 3. Load the base model and its original tokenizer
+model = AutoModelForMaskedLM.from_pretrained(BASE_MODEL_PATH)
+original_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
+
+# 4. Load the custom tokenizer and train it on your corpus
+custom_tokenizer_template = AutoTokenizer.from_pretrained(NEW_CUSTOM_TOKENIZER_PATH)
+new_tokenizer = custom_tokenizer_template.train_new_from_iterator(corpus, vocab_size=VOCAB_SIZE)
+
+# 5. Define a preprocessing function to handle tokenization differences
+# CamemBERT's ' ' vs. RoBERTa's 'Ġ'
+def roberta_to_camembert_preprocessing(token):
+    return token.replace('Ġ', '▁')
+
+# 6. Initialize the adapter with the custom preprocessing and adapt the model
+adapter = TokenizerAdapter(custom_preprocessing=roberta_to_camembert_preprocessing)
+model = adapter.adapt_from_pretrained(model, new_tokenizer, original_tokenizer)
+
+# 7. Save your adapted model and new tokenizer
+model.save_pretrained(SAVE_MODEL_PATH)
+new_tokenizer.save_pretrained(SAVE_MODEL_PATH)
+
+print(f"Model with custom tokenizer adapted and saved to {SAVE_MODEL_PATH}")
+```
+
+## Contributing
+
+Contributions are welcome! If you find a bug or have a feature request, please open an issue on the [GitHub repository](https://github.com/ccdv-ai/tokenizer-adapter).
+
+## License
+
+This project is licensed under the Apache-2.0 License. See the [LICENSE](https://github.com/ccdv-ai/tokenizer-adapter/blob/main/LICENSE) file for details.
